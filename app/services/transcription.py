@@ -1,7 +1,11 @@
 import abc
 import os
+import logging
 from typing import Dict, Any, Optional
 from groq import AsyncGroq
+from tenacity import retry, stop_after_attempt, wait_exponential, before_sleep_log
+
+logger = logging.getLogger("ai-worker")
 
 class TranscriptionResult:
     def __init__(self, text: str, language: Optional[str] = None):
@@ -24,6 +28,12 @@ class GroqTranscriptionService(TranscriptionService):
     def __init__(self, api_key: str):
         self.client = AsyncGroq(api_key=api_key)
 
+    @retry(
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=1, min=1, max=16),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True
+    )
     async def transcribe(self, audio_file_path: str) -> TranscriptionResult:
         with open(audio_file_path, "rb") as file:
             response = await self.client.audio.transcriptions.create(

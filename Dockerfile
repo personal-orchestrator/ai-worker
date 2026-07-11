@@ -6,4 +6,6 @@ RUN uv sync --frozen --no-dev
 
 COPY . .
 
-CMD ["uv", "run", "python", "-m", "app.main"]
+ENV PATH="/app/.venv/bin:$PATH"
+
+CMD ["python", "-m", "app.main"]
