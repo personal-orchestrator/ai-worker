@@ -29,6 +29,7 @@ class TranscriptionWorker:
             payload = json.loads(data)
         except json.JSONDecodeError:
             logger.error(f"Invalid JSON payload: {data}")
+            await msg.ack()
             return
             
         filename = payload.get("filename")
@@ -36,14 +37,18 @@ class TranscriptionWorker:
         
         if not filename:
             logger.error("Message missing 'filename' field")
+            await msg.ack()
             return
 
         try:
             file_path = self._get_file_path(filename)
             if not file_path:
+                await msg.ack()
                 return
 
             await self._process_file(file_path, filename, out_of_order)
+            
+            await msg.ack()
 
         except Exception as e:
             logger.error(f"Error processing message: {e}", exc_info=True)
