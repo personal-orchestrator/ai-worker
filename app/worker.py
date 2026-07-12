@@ -2,6 +2,7 @@ import fcntl
 import json
 import logging
 import os
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Optional
 from app.services.transcription import TranscriptionService, TranscriptionResult
@@ -99,40 +100,46 @@ class TranscriptionWorker:
             date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         return os.path.join(self.transcriptions_dir, f"transcripts_{date_str}.jsonl")
 
+    @contextmanager
+    def _file_lock(self, file_obj):
+        fcntl.flock(file_obj, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(file_obj, fcntl.LOCK_UN)
+
     def _append_to_file(self, data: dict, output_path: str):
         with open(output_path, "a", encoding="utf-8") as f:
-            fcntl.flock(f, fcntl.LOCK_EX)
-            try:
+            with self._file_lock(f):
                 json.dump(data, f, ensure_ascii=False)
                 f.write("\n")
-            finally:
-                fcntl.flock(f, fcntl.LOCK_UN)
 
     def _sort_file(self, output_path: str):
         if not os.path.exists(output_path):
             return
             
         with open(output_path, "r+", encoding="utf-8") as f:
-            fcntl.flock(f, fcntl.LOCK_EX)
-            try:
-                f.seek(0)
-                lines = f.readlines()
-                records = []
-                for line in lines:
-                    if not line.strip():
-                        continue
-                    try:
-                        records.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        continue
-                
+            with self._file_lock(f):
+                records = self._read_records(f)
                 records.sort(key=lambda x: x.get("timestamp", ""))
-                
-                f.seek(0)
-                f.truncate()
-                for record in records:
-                    json.dump(record, f, ensure_ascii=False)
-                    f.write("\n")
-            finally:
-                fcntl.flock(f, fcntl.LOCK_UN)
+                self._write_records(f, records)
+
+    def _read_records(self, f) -> list[dict]:
+        f.seek(0)
+        records = []
+        for line in f:
+            if not line.strip():
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        return records
+
+    def _write_records(self, f, records: list[dict]):
+        f.seek(0)
+        f.truncate()
+        for record in records:
+            json.dump(record, f, ensure_ascii=False)
+            f.write("\n")
 
