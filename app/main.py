@@ -1,12 +1,13 @@
 import asyncio
 import logging
 import signal
+import os
 import nats
-from nats.aio.client import Client as NATS
 
 from app.config import settings
 from app.services.transcription import GroqTranscriptionService
 from app.worker import TranscriptionWorker
+from app.reindexer import Reindexer
 
 logging.basicConfig(level=settings.log_level, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("ai-worker")
@@ -33,8 +34,12 @@ class Application:
         logger.info(f"Subscribed to subject {settings.nats_subject}")
 
         self._setup_signal_handlers()
+        
+        watcher_task = asyncio.create_task(self._watch_for_reindex())
 
         await self.stop_event.wait()
+        
+        watcher_task.cancel()
 
         logger.info("Unsubscribing and closing NATS connection")
         await sub.unsubscribe()
@@ -48,6 +53,37 @@ class Application:
     def _signal_handler(self):
         logger.info("Shutdown signal received")
         self.stop_event.set()
+
+    async def _watch_for_reindex(self):
+        reindex_file = os.path.join(os.path.dirname(settings.storage_dir), "reindex")
+        logger.info(f"Starting reindex watcher on {reindex_file}, polling every {settings.reindex_poll_interval}s")
+        
+        reindexer = Reindexer(
+            storage_dir=settings.storage_dir,
+            transcriptions_dir=settings.transcriptions_dir,
+            nc=self.nc,
+            nats_subject=settings.nats_subject
+        )
+        
+        while not self.stop_event.is_set():
+            try:
+                if os.path.exists(reindex_file):
+                    try:
+                        os.remove(reindex_file)
+                        logger.info("Reindex file detected and removed. Triggering reindex.")
+                        await reindexer.run()
+                    except FileNotFoundError:
+                        # Another worker replica might have removed it, ignore
+                        pass
+                    except Exception as e:
+                        logger.error(f"Error removing reindex file or running reindexer: {e}")
+            except Exception as e:
+                logger.error(f"Error in reindex watcher loop: {e}")
+                
+            try:
+                await asyncio.sleep(settings.reindex_poll_interval)
+            except asyncio.CancelledError:
+                break
 
 
 if __name__ == "__main__":

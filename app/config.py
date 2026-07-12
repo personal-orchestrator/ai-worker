@@ -7,7 +7,8 @@ class Settings(BaseSettings):
     nats_subject: str = "audio.ingested"
     groq_api_key: str
     log_level: str = "INFO"
+    reindex_poll_interval: int = 60
     
     model_config = SettingsConfigDict(env_file=".env.secrets", env_file_encoding="utf-8", extra="ignore")
 
-settings = Settings()
+settings = Settings()  # type: ignore[call-arg]
