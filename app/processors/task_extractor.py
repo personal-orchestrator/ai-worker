@@ -47,9 +47,12 @@ class TaskExtractorProcessor(LiveProcessor):
         self.prompt = ChatPromptTemplate.from_messages([
             ("system", """You are an expert assistant designed to extract explicit tasks or action items from dictated transcripts.
             
-EXTRACT ONLY EXPLICITLY STATED TASKS OR ACTION ITEMS.
-DO NOT include general thoughts, background context, ideas, or observations.
-IF YOU ARE UNSURE IF SOMETHING IS A TASK, DO NOT CREATE IT.
+CRITICAL RULES FOR EXTRACTION:
+1. EXTRACT ONLY EXPLICITLY STATED TASKS OR ACTION ITEMS.
+2. DO NOT include general thoughts, background context, ideas, or observations.
+3. IGNORE NARRATION OF CURRENT OR IMMEDIATE ACTIONS. If the speaker is just narrating what they are doing (e.g., "I go to do something", "I am going to the store now"), DO NOT create a task.
+4. Only extract items where the speaker explicitly indicates they need to do it later or want it tracked as a ToDo (e.g., "Remind me to...", "I need to remember to...", "Add a task to...").
+5. IF YOU ARE UNSURE IF SOMETHING IS A TASK, DO NOT CREATE IT. Return an empty list instead.
 
 {format_instructions}"""),
             ("user", "Transcript:\n{transcript}")
