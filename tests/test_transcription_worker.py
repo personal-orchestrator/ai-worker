@@ -2,7 +2,7 @@ import os
 import json
 import pytest
 from unittest.mock import Mock, patch, AsyncMock
-from app.worker import TranscriptionWorker
+from app.workers.transcription import TranscriptionWorker
 from app.services.transcription import TranscriptionResult, TranscriptionService
 
 class MockTranscriptionService(TranscriptionService):
