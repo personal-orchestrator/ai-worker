@@ -27,6 +27,7 @@ class Application:
         worker = TranscriptionWorker(
             transcription_service=transcription_service,
             storage_dir=settings.storage_dir,
+            transcriptions_raw_dir=settings.transcriptions_raw_dir,
             transcriptions_dir=settings.transcriptions_dir,
         )
 
