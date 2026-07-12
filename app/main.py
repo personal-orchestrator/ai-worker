@@ -34,8 +34,20 @@ class Application:
             transcriptions_dir=settings.transcriptions_dir,
         )
 
-        sub = await self.nc.subscribe(settings.nats_subject, cb=worker.handle_message)
-        logger.info(f"Subscribed to subject {settings.nats_subject}")
+        js = self.nc.jetstream()
+        try:
+            await js.add_stream(name="audio_events", subjects=[settings.nats_subject])
+            logger.info("JetStream stream 'audio_events' ensured")
+        except Exception as e:
+            logger.info(f"Stream may already exist or cannot be modified: {e}")
+
+        sub = await js.subscribe(
+            settings.nats_subject,
+            cb=worker.handle_message,
+            durable="ai-worker-consumer",
+            stream="audio_events"
+        )
+        logger.info(f"Subscribed to JetStream subject {settings.nats_subject} with durable consumer")
 
         self._setup_signal_handlers()
         

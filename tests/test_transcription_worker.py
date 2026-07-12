@@ -1,7 +1,7 @@
 import os
 import json
 import pytest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, patch, AsyncMock
 from app.worker import TranscriptionWorker
 from app.services.transcription import TranscriptionResult, TranscriptionService
 
@@ -51,6 +51,7 @@ async def test_handle_message_success(worker, temp_dirs):
     msg = Mock()
     msg.subject = "audio.ingested"
     msg.data = json.dumps({"filename": filename}).encode("utf-8")
+    msg.ack = AsyncMock()
 
     await worker.handle_message(msg)
 
@@ -79,6 +80,7 @@ async def test_handle_message_missing_file(worker, temp_dirs):
     msg = Mock()
     msg.subject = "audio.ingested"
     msg.data = json.dumps({"filename": "missing.m4a"}).encode("utf-8")
+    msg.ack = AsyncMock()
 
     await worker.handle_message(msg)
 
@@ -93,6 +95,7 @@ async def test_handle_message_invalid_json(worker, temp_dirs):
     msg = Mock()
     msg.subject = "audio.ingested"
     msg.data = b"invalid json"
+    msg.ack = AsyncMock()
 
     await worker.handle_message(msg)
 
@@ -136,6 +139,7 @@ async def test_handle_message_reindex_sort(worker, temp_dirs):
         msg = Mock()
         msg.subject = "audio.ingested"
         msg.data = json.dumps({"filename": filename, "out_of_order": True}).encode("utf-8")
+        msg.ack = AsyncMock()
         
         await worker.handle_message(msg)
             
@@ -172,6 +176,7 @@ async def test_handle_message_non_english(temp_dirs):
     msg = Mock()
     msg.subject = "audio.ingested"
     msg.data = json.dumps({"filename": filename}).encode("utf-8")
+    msg.ack = AsyncMock()
 
     await worker_pl.handle_message(msg)
 
