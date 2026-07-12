@@ -6,8 +6,14 @@ from app.worker import TranscriptionWorker
 from app.services.transcription import TranscriptionResult, TranscriptionService
 
 class MockTranscriptionService(TranscriptionService):
+    def __init__(self, language="en"):
+        self.language = language
+
     async def transcribe(self, audio_file_path: str) -> TranscriptionResult:
-        return TranscriptionResult(text="This is a test transcription", language="en")
+        return TranscriptionResult(text="This is a test transcription", language=self.language)
+
+    async def translate(self, audio_file_path: str) -> TranscriptionResult:
+        return TranscriptionResult(text="This is a translated test transcription", language="en")
 
 @pytest.fixture
 def mock_service():
@@ -16,21 +22,23 @@ def mock_service():
 @pytest.fixture
 def temp_dirs(tmp_path):
     storage_dir = tmp_path / "storage"
+    transcriptions_raw_dir = tmp_path / "transcriptions-raw"
     transcriptions_dir = tmp_path / "transcriptions"
-    return str(storage_dir), str(transcriptions_dir)
+    return str(storage_dir), str(transcriptions_raw_dir), str(transcriptions_dir)
 
 @pytest.fixture
 def worker(mock_service, temp_dirs):
-    storage_dir, transcriptions_dir = temp_dirs
+    storage_dir, transcriptions_raw_dir, transcriptions_dir = temp_dirs
     return TranscriptionWorker(
         transcription_service=mock_service,
         storage_dir=storage_dir,
+        transcriptions_raw_dir=transcriptions_raw_dir,
         transcriptions_dir=transcriptions_dir
     )
 
 @pytest.mark.asyncio
 async def test_handle_message_success(worker, temp_dirs):
-    storage_dir, transcriptions_dir = temp_dirs
+    storage_dir, transcriptions_raw_dir, transcriptions_dir = temp_dirs
     
     # Create a dummy audio file
     filename = "test_audio.m4a"
@@ -65,7 +73,7 @@ async def test_handle_message_success(worker, temp_dirs):
 
 @pytest.mark.asyncio
 async def test_handle_message_missing_file(worker, temp_dirs):
-    storage_dir, transcriptions_dir = temp_dirs
+    storage_dir, transcriptions_raw_dir, transcriptions_dir = temp_dirs
     
     # Create a dummy message
     msg = Mock()
@@ -79,7 +87,7 @@ async def test_handle_message_missing_file(worker, temp_dirs):
 
 @pytest.mark.asyncio
 async def test_handle_message_invalid_json(worker, temp_dirs):
-    storage_dir, transcriptions_dir = temp_dirs
+    storage_dir, transcriptions_raw_dir, transcriptions_dir = temp_dirs
     
     # Create a dummy message
     msg = Mock()
@@ -101,7 +109,7 @@ def test_extract_timestamp(worker):
 
 @pytest.mark.asyncio
 async def test_handle_message_reindex_sort(worker, temp_dirs):
-    storage_dir, transcriptions_dir = temp_dirs
+    storage_dir, transcriptions_raw_dir, transcriptions_dir = temp_dirs
     os.makedirs(storage_dir, exist_ok=True)
     os.makedirs(transcriptions_dir, exist_ok=True)
     
@@ -125,12 +133,11 @@ async def test_handle_message_reindex_sort(worker, temp_dirs):
         f.write(b"dummy")
 
     with patch.object(worker, '_extract_timestamp', return_value="2026-07-08T11:00:00+00:00"):
-        with patch.object(worker, '_get_output_path', return_value=output_path):
-            msg = Mock()
-            msg.subject = "audio.ingested"
-            msg.data = json.dumps({"filename": filename, "out_of_order": True}).encode("utf-8")
-            
-            await worker.handle_message(msg)
+        msg = Mock()
+        msg.subject = "audio.ingested"
+        msg.data = json.dumps({"filename": filename, "out_of_order": True}).encode("utf-8")
+        
+        await worker.handle_message(msg)
             
     with open(output_path, "r") as f:
         lines = f.readlines()
@@ -143,3 +150,48 @@ async def test_handle_message_reindex_sort(worker, temp_dirs):
     assert data0["timestamp"] == "2026-07-08T10:00:00+00:00"
     assert data1["timestamp"] == "2026-07-08T11:00:00+00:00"
     assert data2["timestamp"] == "2026-07-08T12:00:00+00:00"
+
+@pytest.mark.asyncio
+async def test_handle_message_non_english(temp_dirs):
+    storage_dir, transcriptions_raw_dir, transcriptions_dir = temp_dirs
+    mock_service_pl = MockTranscriptionService(language="pl")
+    
+    worker_pl = TranscriptionWorker(
+        transcription_service=mock_service_pl,
+        storage_dir=storage_dir,
+        transcriptions_raw_dir=transcriptions_raw_dir,
+        transcriptions_dir=transcriptions_dir
+    )
+    
+    filename = "test_audio_pl.m4a"
+    file_path = os.path.join(storage_dir, filename)
+    os.makedirs(storage_dir, exist_ok=True)
+    with open(file_path, "wb") as f:
+        f.write(b"dummy data")
+
+    msg = Mock()
+    msg.subject = "audio.ingested"
+    msg.data = json.dumps({"filename": filename}).encode("utf-8")
+
+    await worker_pl.handle_message(msg)
+
+    # Verify both raw and translated directories contain output
+    from datetime import datetime, timezone
+    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    output_filename = f"transcripts_{date_str}.jsonl"
+    
+    raw_path = os.path.join(transcriptions_raw_dir, output_filename)
+    translated_path = os.path.join(transcriptions_dir, output_filename)
+    
+    assert os.path.exists(raw_path)
+    assert os.path.exists(translated_path)
+    
+    with open(raw_path, "r") as f:
+        raw_data = json.loads(f.readlines()[0])
+        assert raw_data["transcription"] == "This is a test transcription"
+        assert raw_data["language"] == "pl"
+        
+    with open(translated_path, "r") as f:
+        translated_data = json.loads(f.readlines()[0])
+        assert translated_data["transcription"] == "This is a translated test transcription"
+        assert translated_data["language"] == "en"

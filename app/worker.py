@@ -10,12 +10,14 @@ from app.services.transcription import TranscriptionService, TranscriptionResult
 logger = logging.getLogger("ai-worker")
 
 class TranscriptionWorker:
-    def __init__(self, transcription_service: TranscriptionService, storage_dir: str, transcriptions_dir: str):
+    def __init__(self, transcription_service: TranscriptionService, storage_dir: str, transcriptions_raw_dir: str, transcriptions_dir: str):
         self.transcription_service = transcription_service
         self.storage_dir = storage_dir
+        self.transcriptions_raw_dir = transcriptions_raw_dir
         self.transcriptions_dir = transcriptions_dir
 
         os.makedirs(self.storage_dir, exist_ok=True)
+        os.makedirs(self.transcriptions_raw_dir, exist_ok=True)
         os.makedirs(self.transcriptions_dir, exist_ok=True)
 
     async def handle_message(self, msg):
@@ -55,9 +57,19 @@ class TranscriptionWorker:
 
     async def _process_file(self, file_path: str, filename: str, out_of_order: bool = False):
         logger.info(f"Starting transcription for {filename}")
-        result = await self.transcription_service.transcribe(file_path)
+        raw_result = await self.transcription_service.transcribe(file_path)
         
-        self._save_transcription(result, filename, out_of_order)
+        # Save raw transcription
+        self._save_transcription(raw_result, filename, self.transcriptions_raw_dir, out_of_order)
+        
+        language = (raw_result.language or "").lower()
+        if language in ("english", "en"):
+            logger.info(f"Audio is already English. Copying raw transcription to translated directory for {filename}")
+            self._save_transcription(raw_result, filename, self.transcriptions_dir, out_of_order)
+        else:
+            logger.info(f"Audio is non-English ({language}). Starting translation for {filename}")
+            translated_result = await self.transcription_service.translate(file_path)
+            self._save_transcription(translated_result, filename, self.transcriptions_dir, out_of_order)
 
     def _extract_timestamp(self, filename: str) -> str:
         # Example: rec_1783484942586_4676c04a-e4bc-473b-ab31-43d5966a9be7.m4a
@@ -71,10 +83,10 @@ class TranscriptionWorker:
         
         return datetime.now(timezone.utc).isoformat()
 
-    def _save_transcription(self, result: TranscriptionResult, original_filename: str, out_of_order: bool = False):
+    def _save_transcription(self, result: TranscriptionResult, original_filename: str, target_dir: str, out_of_order: bool = False):
         timestamp = self._extract_timestamp(original_filename)
         transcription_data = self._create_transcription_record(result, original_filename, timestamp)
-        output_path = self._get_output_path(timestamp)
+        output_path = self._get_output_path(timestamp, target_dir)
         
         self._append_to_file(transcription_data, output_path)
         logger.info(f"Successfully appended transcription to {output_path}")
@@ -93,12 +105,12 @@ class TranscriptionWorker:
             data["language"] = result.language
         return data
 
-    def _get_output_path(self, timestamp: str) -> str:
+    def _get_output_path(self, timestamp: str, target_dir: str) -> str:
         try:
             date_str = datetime.fromisoformat(timestamp).strftime("%Y-%m-%d")
         except Exception:
             date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        return os.path.join(self.transcriptions_dir, f"transcripts_{date_str}.jsonl")
+        return os.path.join(target_dir, f"transcripts_{date_str}.jsonl")
 
     @contextmanager
     def _file_lock(self, file_obj):
