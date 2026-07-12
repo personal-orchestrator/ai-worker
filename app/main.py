@@ -23,7 +23,10 @@ class Application:
         await self.nc.connect(settings.nats_url, connect_timeout=10)
         logger.info("Connected to NATS")
 
-        transcription_service = GroqTranscriptionService(api_key=settings.groq_api_key)
+        transcription_service = GroqTranscriptionService(
+            api_key=settings.groq_api_key,
+            rate_limit_per_minute=settings.groq_rate_limit_per_minute
+        )
         worker = TranscriptionWorker(
             transcription_service=transcription_service,
             storage_dir=settings.storage_dir,

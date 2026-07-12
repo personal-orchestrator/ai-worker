@@ -4,6 +4,7 @@ import logging
 from typing import Dict, Any, Optional
 from groq import AsyncGroq
 from tenacity import retry, stop_after_attempt, wait_exponential, before_sleep_log
+from aiolimiter import AsyncLimiter
 
 logger = logging.getLogger("ai-worker")
 
@@ -30,8 +31,11 @@ class TranscriptionService(abc.ABC):
         pass
 
 class GroqTranscriptionService(TranscriptionService):
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, rate_limit_per_minute: int = 20):
         self.client = AsyncGroq(api_key=api_key)
+        # Using a bucket capacity of 1 and spacing out the time period prevents bursting,
+        # ensuring we strictly wait between requests instead of firing them all at once.
+        self.limiter = AsyncLimiter(1, 60.0 / rate_limit_per_minute) if rate_limit_per_minute > 0 else None
 
     @retry(
         stop=stop_after_attempt(5),
@@ -40,6 +44,9 @@ class GroqTranscriptionService(TranscriptionService):
         reraise=True
     )
     async def transcribe(self, audio_file_path: str) -> TranscriptionResult:
+        if self.limiter:
+            await self.limiter.acquire()
+            
         with open(audio_file_path, "rb") as file:
             response = await self.client.audio.transcriptions.create(
                 file=(os.path.basename(audio_file_path), file.read()),
@@ -59,6 +66,9 @@ class GroqTranscriptionService(TranscriptionService):
         reraise=True
     )
     async def translate(self, audio_file_path: str) -> TranscriptionResult:
+        if self.limiter:
+            await self.limiter.acquire()
+            
         with open(audio_file_path, "rb") as file:
             response = await self.client.audio.translations.create(
                 file=(os.path.basename(audio_file_path), file.read()),

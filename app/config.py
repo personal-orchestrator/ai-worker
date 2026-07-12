@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     nats_url: str = "nats://localhost:4222"
     nats_subject: str = "audio.ingested"
     groq_api_key: str
+    groq_rate_limit_per_minute: int = 10
     log_level: str = "INFO"
     reindex_poll_interval: int = 60
     
