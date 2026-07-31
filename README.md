@@ -10,7 +10,7 @@ An asynchronous pipeline built for processing and transcribing audio recordings 
    - **Normalized Transcriptions** (`/data/transcriptions`): English-translated transcription. To optimize token usage, audio is only sent to the translation endpoint if the original transcription was non-English.
 3. **Internal Event Queue (`transcription.completed`)**: Successfully transcribed English text is published to an internal JetStream queue.
 4. **Downstream Processors (`ProcessorWorker`)**: Consumes the translated text and routes it to various `LiveProcessors`:
-   - **ToDo Extractor**: Leverages LangChain and Groq (`llama-3.3-70b-versatile`) with strict prompt engineering and Pydantic validation to extract explicitly dictated action items. Extracted `ToDo` items (with priorities and reminders) are published as JSON to `extractor.todos.created`.
+   - **ToDo Extractor**: Leverages LangChain and Groq (`llama-3.3-70b-versatile`) with strict prompt engineering and Pydantic validation to extract explicitly dictated action items. Extracted `ToDo` items (with priorities and reminders) are published as JSON to `extractor.todos.created`. Additionally, if tasks are found, they are saved alongside the original transcript to an evaluation log (`tasks.jsonl` in `tasks_eval_dir`) for fine-tuning and false-positive tracking.
 5. **Reindexing**: A built-in watcher monitors for a `reindex` file trigger. When triggered, it scans the storage directory for any audio files missing from the transcriptions directory and queues them for processing.
 
 ## Configuration
@@ -23,6 +23,7 @@ The worker is configured via environment variables (or `.env.secrets`):
 - `STORAGE_DIR`: Directory where incoming audio files are mounted.
 - `TRANSCRIPTIONS_RAW_DIR`: Output directory for raw literal transcriptions.
 - `TRANSCRIPTIONS_DIR`: Output directory for English-normalized transcriptions.
+- `TASKS_EVAL_DIR`: Output directory for task extraction evaluation logs (defaults to `/data/tasks-eval`).
 - `NATS_SUBJECT`: Subject for raw audio events (defaults to `audio.ingested`).
 - `NATS_TRANSCRIPTIONS_SUBJECT`: Internal queue subject (defaults to `transcription.completed`).
 - `NATS_TODOS_SUBJECT`: Outgoing tasks subject (defaults to `extractor.todos.created`).
