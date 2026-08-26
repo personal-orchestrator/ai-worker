@@ -5,6 +5,8 @@ import nats
 from dataclasses import dataclass
 from typing import Callable, Awaitable, Any
 
+from nats.js import api
+
 from app.config import settings
 from app.workers import ProcessorWorker
 from app.processors.task_extractor import TaskExtractorProcessor
@@ -20,6 +22,7 @@ class SubscriptionConfig:
     cb: Callable[[Any], Awaitable[None]]
     durable: str
     stream: str
+    consumer_config: api.ConsumerConfig
 
 logging.basicConfig(level=settings.log_level, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("ai-worker")
@@ -36,7 +39,10 @@ class Application:
         logger.info("Connected to NATS")
 
         task_extractor = TaskExtractorProcessor(nc=self.nc)
-        processor_worker = ProcessorWorker(processors=[task_extractor])
+        processor_worker = ProcessorWorker(
+            processors=[task_extractor],
+            progress_interval=settings.nats_progress_interval,
+        )
 
         js = self.nc.jetstream()
         
@@ -52,25 +58,7 @@ class Application:
             except Exception as e:
                 logger.info(f"Stream '{stream.name}' may already exist or cannot be modified: {e}")
 
-        subscriptions = [
-            SubscriptionConfig(
-                subject=settings.nats_transcriptions_subject,
-                cb=processor_worker.handle_message,
-                durable="ai-processor-consumer",
-                stream="processing_events"
-            )
-        ]
-        
-        self.subs = []
-        for sub_config in subscriptions:
-            sub = await js.subscribe(
-                sub_config.subject,
-                cb=sub_config.cb,
-                durable=sub_config.durable,
-                stream=sub_config.stream
-            )
-            self.subs.append(sub)
-            logger.info(f"Subscribed to JetStream subject {sub_config.subject} with durable consumer {sub_config.durable}")
+        await self._subscribe_consumers(js, processor_worker)
 
         self._setup_signal_handlers()
 
@@ -80,6 +68,48 @@ class Application:
         for sub in getattr(self, 'subs', []):
             await sub.unsubscribe()
         await self.nc.close()
+
+    @staticmethod
+    def _consumer_config() -> api.ConsumerConfig:
+        """Consumer settings sized for a single worker doing rate-limited LLM work.
+
+        NOTE: nats-py only applies this when the durable consumer does not exist yet. An
+        already-created consumer keeps whatever config the server holds, so consumers that
+        predate this change need a one-off `nats consumer edit`.
+        """
+        return api.ConsumerConfig(
+            ack_wait=settings.nats_ack_wait,
+            max_deliver=settings.nats_max_deliver,
+            max_ack_pending=settings.nats_max_ack_pending,
+        )
+
+    async def _subscribe_consumers(self, js, processor_worker):
+        subscriptions = [
+            SubscriptionConfig(
+                subject=settings.nats_transcriptions_subject,
+                cb=processor_worker.handle_message,
+                durable="ai-processor-consumer",
+                stream="processing_events",
+                consumer_config=self._consumer_config()
+            )
+        ]
+
+        self.subs = []
+        for sub_config in subscriptions:
+            sub = await js.subscribe(
+                sub_config.subject,
+                cb=sub_config.cb,
+                durable=sub_config.durable,
+                stream=sub_config.stream,
+                config=sub_config.consumer_config
+            )
+            self.subs.append(sub)
+            logger.info(
+                f"Subscribed to JetStream subject {sub_config.subject} with durable consumer "
+                f"{sub_config.durable} (ack_wait: {sub_config.consumer_config.ack_wait}s, "
+                f"max_deliver: {sub_config.consumer_config.max_deliver}, "
+                f"max_ack_pending: {sub_config.consumer_config.max_ack_pending})"
+            )
 
     def _setup_signal_handlers(self):
         loop = asyncio.get_running_loop()

@@ -27,3 +27,31 @@ The worker is configured via environment variables (or `.env.secrets`):
 - `NATS_SUBJECT`: Subject for raw audio events (defaults to `audio.ingested`).
 - `NATS_TRANSCRIPTIONS_SUBJECT`: Internal queue subject (defaults to `transcription.completed`).
 - `NATS_TODOS_SUBJECT`: Outgoing tasks subject (defaults to `extractor.todos.created`).
+- `NATS_ACK_WAIT`: How long JetStream waits for an ack before redelivering (defaults to 120s).
+- `NATS_MAX_DELIVER`: Redelivery ceiling per message (defaults to 3).
+- `NATS_MAX_ACK_PENDING`: Outstanding unacked messages the server may push (defaults to 1).
+- `NATS_PROGRESS_INTERVAL`: How often `msg.in_progress()` resets the ack timer while a message is in flight (defaults to 30s).
+
+## JetStream consumer configuration
+
+The `ai-processor-consumer` durable is created with explicit settings rather than NATS server
+defaults, which are a poor fit for this workload — extraction is a rate-limited LLM call that
+can outrun the default 30s `ack_wait`, and `max_deliver=-1` means a message that keeps failing
+is retried forever.
+
+The heartbeat is what protects slow messages: `+WPI` resets `ack_wait` without counting as a
+delivery, so a slow extraction stays on its first delivery instead of being handed out again.
+If the worker dies, the heartbeats stop and the message is redelivered as normal.
+
+**Applying this to an existing consumer.** `nats-py`'s `js.subscribe()` only applies the config
+when the durable consumer does not yet exist; an existing one keeps whatever the server holds.
+Consumers created before this change need a one-off:
+
+```bash
+nats consumer edit processing_events ai-processor-consumer \
+  --ack-wait=2m --max-deliver=3 --max-pending=1
+```
+
+Use `edit` rather than delete-and-recreate so the consumer keeps its ack floor and does not
+replay the stream from the start. Verify with `nats consumer info processing_events
+ai-processor-consumer` — `Redelivered Messages` should stay near zero under normal load.
