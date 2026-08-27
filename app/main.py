@@ -23,14 +23,9 @@ class SubscriptionConfig:
     durable: str
     stream: str
 
-# Consumer settings sized for a single worker doing one LLM call per message. The server defaults
-# (ack_wait=30s, max_deliver=-1, max_ack_pending=1000) push a deep backlog at a worker that drains
-# it serially, and nothing ever caps redelivery.
-#
-# ACK_WAIT is a death-detection window, not a duration budget: ChatGroq's own retries can exceed
-# it on a slow call, and ProcessorWorker's periodic msg.in_progress() is what carries that. The
-# finite MAX_DELIVER matters most here — extraction has failed on a decommissioned model since
-# 2026-08-14, and unlimited redelivery retries those forever. See README.
+# Server defaults (ack_wait=30s, max_deliver=-1, max_ack_pending=1000) are wrong for a single
+# worker doing one slow LLM call per message. ACK_WAIT_SECONDS is a death-detection window, not a
+# duration budget — the msg.in_progress() heartbeat covers duration. See README.
 ACK_WAIT_SECONDS = 120.0
 MAX_DELIVER = 3
 MAX_ACK_PENDING = 1
@@ -89,17 +84,17 @@ class Application:
 
         self.subs = []
         for sub_config in subscriptions:
+            config = api.ConsumerConfig(
+                ack_wait=ACK_WAIT_SECONDS,
+                max_deliver=MAX_DELIVER,
+                max_ack_pending=MAX_ACK_PENDING,
+            )
             sub = await js.subscribe(
                 sub_config.subject,
                 cb=sub_config.cb,
                 durable=sub_config.durable,
                 stream=sub_config.stream,
-                # Built per call: js.subscribe mutates the config it is handed.
-                config=api.ConsumerConfig(
-                    ack_wait=ACK_WAIT_SECONDS,
-                    max_deliver=MAX_DELIVER,
-                    max_ack_pending=MAX_ACK_PENDING,
-                )
+                config=config
             )
             self.subs.append(sub)
             logger.info(f"Subscribed to JetStream subject {sub_config.subject} with durable consumer {sub_config.durable}")
