@@ -11,7 +11,7 @@ An asynchronous pipeline built for processing and transcribing audio recordings 
 3. **Internal Event Queue (`transcription.completed`)**: Successfully transcribed English text is published to an internal JetStream queue.
 4. **Downstream Processors (`ProcessorWorker`)**: Consumes the translated text and routes it to various `LiveProcessors`:
    - **ToDo Extractor**: Leverages LangChain and Groq (`llama-3.3-70b-versatile`) with strict prompt engineering and Pydantic validation to extract explicitly dictated action items. Extracted `ToDo` items (with priorities and reminders) are published as JSON to `extractor.todos.created`. Additionally, if tasks are found, they are saved alongside the original transcript to an evaluation log (`tasks.jsonl` in `tasks_eval_dir`) for fine-tuning and false-positive tracking.
-5. **Reindexing**: A built-in watcher monitors for a `reindex` file trigger. When triggered, it scans the storage directory for any audio files missing from the transcriptions directory and queues them for processing.
+There is no reindexer in this service — the `reindex` watcher lives in `transcription-worker`, and this repo has no way to rescan for work it missed. See the note on dropped messages below.
 
 ## Configuration
 
@@ -40,28 +40,21 @@ defaults, which are a poor fit for this workload. The values are constants in `a
 | `max_deliver` | 3 | a finite redelivery ceiling; the server default of `-1` never stops |
 | `max_ack_pending` | 1 | the worker drains messages serially at `replicas: 1` |
 | progress interval | 20s | how often `msg.in_progress()` (`+WPI`) resets the ack timer while a message is in flight |
-| max keepalive | 600s | how long the heartbeat will hold one message before giving up |
 
 The interval is 20s rather than something sized against our own 120s because it also has to beat
 the **30s server default** in force until the step below has been run.
 
-**The keepalive cap matters more here than anywhere else in the pipeline.** `ChatGroq` is
-constructed without `request_timeout`, and langchain passes that `None` straight through to the
-Groq SDK — which only substitutes its own 60s default when the argument is absent, not when it is
-explicitly `None`. The extraction call therefore has **no HTTP timeout at all** and a hung socket
-blocks it forever. A heartbeat with no cap would hold that message alive indefinitely:
-`max_deliver` only engages on redelivery, and with `max_ack_pending=1` the consumer would never be
-handed another message — it would go silent behind a live, healthy-looking pod. Past the cap the
-beats stop, `ack_wait` expires, and the message is redelivered. Giving the extraction call a real
-timeout is the proper fix and is not in scope here.
+**Known limitation, and it is sharper here than elsewhere.** The extraction call has no HTTP
+timeout at all — `ChatGroq` is built without `request_timeout` — so a hung socket blocks it
+forever, and the heartbeat will hold that message indefinitely. Capping the heartbeat would not
+help: `nats-py` dispatches callbacks serially, so a hung call blocks the consumer at the client
+whatever the server does with the ack, and a cap would only release the claim while the work
+continued, duplicating it when the call finally returned. Giving the call a real timeout is the
+proper fix and is tracked separately; until then, recovering from a hang means restarting the pod.
 
-**Messages that exhaust `max_deliver` are dropped with no record.** There is no dead-letter path
-yet (issue `B3`) and, unlike `transcription-worker`, no reindexer to rescan for missed work — a
-dropped `transcription.completed` means that dictation's todos are never extracted and nothing
-notices. Note this only ever bites on `ack_wait` expiry (a crash or a hang). Extraction *failures*
-do not redeliver at all: `TaskExtractorProcessor.process` catches every exception and
-`handle_message` then acks, so a failed extraction is discarded on its first delivery, with or
-without this change. That silent loss is issues `B1`/`B2`, not this one.
+**Messages that exhaust `max_deliver` are dropped with no record** — there is no dead-letter path
+yet (issue `B3`), and this service has no reindexer, so a lost `transcription.completed` means
+that dictation's todos are never extracted and nothing notices.
 
 ### Applying this to an existing consumer
 
@@ -76,13 +69,12 @@ nats consumer edit processing_events ai-processor-consumer \
 nats consumer edit processing_events ai-processor-consumer --max-deliver=3
 ```
 
-**Two commands, in that order, and check the backlog between them.** Setting `--max-deliver=3`
-makes the server immediately stop redelivering anything already at or past three deliveries —
-against the measured state (35,785 deliveries for 9,270 messages) that discards the entire
-in-flight backlog at the moment you run it, and this repo has no reindexer to recover it.
-`--ack-wait` and `--max-pending` stop the amplification without dropping anything, so apply those
-first, let the backlog drain (`nats consumer info processing_events ai-processor-consumer`, watch
-`Unprocessed Messages` fall), and only then set the ceiling.
+**Two commands, in that order, and check the backlog between them.** `--ack-wait` and
+`--max-pending` stop the amplification without dropping anything. `--max-deliver=3` discards every
+pending message already past three deliveries — against the measured backlog (35,785 deliveries
+for 9,270 messages), all of them — as each comes up for redelivery, and nothing here recovers
+them. Apply it only once the backlog has drained (`nats consumer info processing_events
+ai-processor-consumer`, watch `Unprocessed Messages` fall).
 
 Use `edit` rather than delete-and-recreate so the consumer keeps its ack floor and does not replay
 the stream from the start. `nats consumer info` is the source of truth for what is actually in

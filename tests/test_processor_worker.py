@@ -16,10 +16,10 @@ async def _slow_process(**kwargs):
     """Processing slow enough to outlive a short heartbeat interval."""
     await asyncio.sleep(0.05)
 
-def _slow_worker(**kwargs):
+def _slow_worker():
     mock_processor = AsyncMock()
     mock_processor.process = AsyncMock(side_effect=_slow_process)
-    return ProcessorWorker(processors=[mock_processor], progress_interval=0.001, **kwargs)
+    return ProcessorWorker(processors=[mock_processor], progress_interval=0.001)
 
 @pytest.mark.asyncio
 async def test_processor_worker_handle_message():
@@ -75,19 +75,3 @@ async def test_failing_heartbeat_neither_stops_beating_nor_fails_the_message():
 
     assert msg.in_progress.await_count > 1, "heartbeat stopped after the first failure"
     msg.ack.assert_awaited_once()
-
-@pytest.mark.asyncio
-async def test_heartbeat_gives_up_after_max_keepalive():
-    """An unbounded heartbeat would hold a hung message alive forever.
-
-    ChatGroq is built without a request timeout, so a hung socket blocks the extraction call
-    indefinitely. max_deliver only engages on redelivery, and with max_ack_pending=1 the
-    consumer would never be handed another message — it would go silent behind a live pod.
-    """
-    worker = _slow_worker(max_keepalive=0.005)
-    msg = _js_msg()
-
-    await worker.handle_message(msg)
-
-    # The body runs ~0.05s, ten times the cap, so beating must have stopped well before it ended.
-    assert 0 < msg.in_progress.await_count < 20
