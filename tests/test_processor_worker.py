@@ -61,6 +61,26 @@ async def test_heartbeat_stops_once_processing_finishes():
     assert msg.in_progress.await_count == settled
 
 @pytest.mark.asyncio
+async def test_heartbeat_stops_when_processing_raises():
+    """The heartbeat must be cancelled on the failure path too, not just the clean one.
+
+    A leaked beat would keep resetting ack_wait on a message nobody is working on, so the
+    server would never redeliver it.
+    """
+    failing_processor = AsyncMock()
+    failing_processor.process = AsyncMock(side_effect=RuntimeError("groq is down"))
+    worker = ProcessorWorker(processors=[failing_processor], progress_interval=0.001)
+    msg = _js_msg()
+
+    await worker.handle_message(msg)
+    settled = msg.in_progress.await_count
+
+    await asyncio.sleep(0.05)
+
+    msg.ack.assert_not_awaited()
+    assert msg.in_progress.await_count == settled, "heartbeat leaked past a failure"
+
+@pytest.mark.asyncio
 async def test_failing_heartbeat_neither_stops_beating_nor_fails_the_message():
     """A failed +WPI is transient, so the loop must keep going and the work must complete.
 

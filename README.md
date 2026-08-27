@@ -11,7 +11,6 @@ An asynchronous pipeline built for processing and transcribing audio recordings 
 3. **Internal Event Queue (`transcription.completed`)**: Successfully transcribed English text is published to an internal JetStream queue.
 4. **Downstream Processors (`ProcessorWorker`)**: Consumes the translated text and routes it to various `LiveProcessors`:
    - **ToDo Extractor**: Leverages LangChain and Groq (`llama-3.3-70b-versatile`) with strict prompt engineering and Pydantic validation to extract explicitly dictated action items. Extracted `ToDo` items (with priorities and reminders) are published as JSON to `extractor.todos.created`. Additionally, if tasks are found, they are saved alongside the original transcript to an evaluation log (`tasks.jsonl` in `tasks_eval_dir`) for fine-tuning and false-positive tracking.
-There is no reindexer in this service — the `reindex` watcher lives in `transcription-worker`, and this repo has no way to rescan for work it missed. See the note on dropped messages below.
 
 ## Configuration
 
@@ -44,17 +43,18 @@ defaults, which are a poor fit for this workload. The values are constants in `a
 The interval is 20s rather than something sized against our own 120s because it also has to beat
 the **30s server default** in force until the step below has been run.
 
-**Known limitation, and it is sharper here than elsewhere.** The extraction call has no HTTP
-timeout at all — `ChatGroq` is built without `request_timeout` — so a hung socket blocks it
-forever, and the heartbeat will hold that message indefinitely. Capping the heartbeat would not
-help: `nats-py` dispatches callbacks serially, so a hung call blocks the consumer at the client
-whatever the server does with the ack, and a cap would only release the claim while the work
-continued, duplicating it when the call finally returned. Giving the call a real timeout is the
-proper fix and is tracked separately; until then, recovering from a hang means restarting the pod.
+**Known limitation.** The extraction call has no HTTP timeout — `ChatGroq` is built without
+`request_timeout` — so a hung socket never returns, and since `nats-py` dispatches a
+subscription's callbacks serially that blocks the consumer entirely. Recovering means restarting
+the pod. Giving the call a real timeout is the fix and is tracked separately; bounding the
+heartbeat is not, since it would release the ack claim while the work continued and duplicate the
+message when the call returned.
 
 **Messages that exhaust `max_deliver` are dropped with no record** — there is no dead-letter path
 yet (issue `B3`), and this service has no reindexer, so a lost `transcription.completed` means
-that dictation's todos are never extracted and nothing notices.
+that dictation's todos are never extracted and nothing notices. Note this only bites on a crash or
+a hang: a message whose *processing* fails is acked anyway and never redelivered, which is issues
+`B1`/`B2`.
 
 ### Applying this to an existing consumer
 
@@ -71,10 +71,15 @@ nats consumer edit processing_events ai-processor-consumer --max-deliver=3
 
 **Two commands, in that order, and check the backlog between them.** `--ack-wait` and
 `--max-pending` stop the amplification without dropping anything. `--max-deliver=3` discards every
-pending message already past three deliveries — against the measured backlog (35,785 deliveries
-for 9,270 messages), all of them — as each comes up for redelivery, and nothing here recovers
-them. Apply it only once the backlog has drained (`nats consumer info processing_events
-ai-processor-consumer`, watch `Unprocessed Messages` fall).
+message already past three deliveries as it comes up for redelivery — against the measured backlog
+(35,785 deliveries for 9,270 messages), all of them — and nothing here recovers them. Apply it
+only once that set has drained.
+
+Check with `nats consumer info processing_events ai-processor-consumer` and watch
+**`Outstanding Acks`** (`num_ack_pending`) fall to zero. Watch that field, not `Unprocessed
+Messages`: the latter is `num_pending`, the messages never delivered at all, and while the
+consumer is saturated at `max_ack_pending=1000` it reads zero even with the whole backlog sitting
+in the redelivery set. Reading it as "drained" is how you lose the backlog.
 
 Use `edit` rather than delete-and-recreate so the consumer keeps its ack floor and does not replay
 the stream from the start. `nats consumer info` is the source of truth for what is actually in
