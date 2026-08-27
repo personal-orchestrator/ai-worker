@@ -22,7 +22,18 @@ class SubscriptionConfig:
     cb: Callable[[Any], Awaitable[None]]
     durable: str
     stream: str
-    consumer_config: api.ConsumerConfig
+
+# Consumer settings sized for a single worker doing one LLM call per message. The server defaults
+# (ack_wait=30s, max_deliver=-1, max_ack_pending=1000) push a deep backlog at a worker that drains
+# it serially, and nothing ever caps redelivery.
+#
+# ACK_WAIT is a death-detection window, not a duration budget: ChatGroq's own retries can exceed
+# it on a slow call, and ProcessorWorker's periodic msg.in_progress() is what carries that. The
+# finite MAX_DELIVER matters most here — extraction has failed on a decommissioned model since
+# 2026-08-14, and unlimited redelivery retries those forever. See README.
+ACK_WAIT_SECONDS = 120.0
+MAX_DELIVER = 3
+MAX_ACK_PENDING = 1
 
 logging.basicConfig(level=settings.log_level, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("ai-worker")
@@ -39,10 +50,7 @@ class Application:
         logger.info("Connected to NATS")
 
         task_extractor = TaskExtractorProcessor(nc=self.nc)
-        processor_worker = ProcessorWorker(
-            processors=[task_extractor],
-            progress_interval=settings.nats_progress_interval,
-        )
+        processor_worker = ProcessorWorker(processors=[task_extractor])
 
         js = self.nc.jetstream()
         
@@ -69,28 +77,13 @@ class Application:
             await sub.unsubscribe()
         await self.nc.close()
 
-    @staticmethod
-    def _consumer_config() -> api.ConsumerConfig:
-        """Consumer settings sized for a single worker doing rate-limited LLM work.
-
-        NOTE: nats-py only applies this when the durable consumer does not exist yet. An
-        already-created consumer keeps whatever config the server holds, so consumers that
-        predate this change need a one-off `nats consumer edit`.
-        """
-        return api.ConsumerConfig(
-            ack_wait=settings.nats_ack_wait,
-            max_deliver=settings.nats_max_deliver,
-            max_ack_pending=settings.nats_max_ack_pending,
-        )
-
     async def _subscribe_consumers(self, js, processor_worker):
         subscriptions = [
             SubscriptionConfig(
                 subject=settings.nats_transcriptions_subject,
                 cb=processor_worker.handle_message,
                 durable="ai-processor-consumer",
-                stream="processing_events",
-                consumer_config=self._consumer_config()
+                stream="processing_events"
             )
         ]
 
@@ -101,15 +94,15 @@ class Application:
                 cb=sub_config.cb,
                 durable=sub_config.durable,
                 stream=sub_config.stream,
-                config=sub_config.consumer_config
+                # Built per call: js.subscribe mutates the config it is handed.
+                config=api.ConsumerConfig(
+                    ack_wait=ACK_WAIT_SECONDS,
+                    max_deliver=MAX_DELIVER,
+                    max_ack_pending=MAX_ACK_PENDING,
+                )
             )
             self.subs.append(sub)
-            logger.info(
-                f"Subscribed to JetStream subject {sub_config.subject} with durable consumer "
-                f"{sub_config.durable} (ack_wait: {sub_config.consumer_config.ack_wait}s, "
-                f"max_deliver: {sub_config.consumer_config.max_deliver}, "
-                f"max_ack_pending: {sub_config.consumer_config.max_ack_pending})"
-            )
+            logger.info(f"Subscribed to JetStream subject {sub_config.subject} with durable consumer {sub_config.durable}")
 
     def _setup_signal_handlers(self):
         loop = asyncio.get_running_loop()

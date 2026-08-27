@@ -1,15 +1,19 @@
+import inspect
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from app.config import settings
-from app.main import Application
+from app.main import ACK_WAIT_SECONDS, MAX_ACK_PENDING, MAX_DELIVER, Application
+from app.workers.processor import ProcessorWorker
 
 
 @pytest.mark.asyncio
-async def test_subscribe_applies_consumer_config():
-    """The consumer must not be created on server defaults — that is what caused the
-    35,785 deliveries for 9,270 messages measured on 2026-08-26."""
+async def test_subscribe_requests_explicit_consumer_config():
+    """A newly created consumer must not be left on server defaults.
+
+    Note this covers the creation path only: nats-py discards the config when the durable
+    already exists, which is why the README carries a one-off `nats consumer edit`.
+    """
     app = Application()
     js = AsyncMock()
     processor_worker = Mock()
@@ -20,14 +24,19 @@ async def test_subscribe_applies_consumer_config():
     js.subscribe.assert_awaited_once()
     config = js.subscribe.await_args.kwargs["config"]
 
-    assert config.ack_wait == settings.nats_ack_wait
-    assert config.max_deliver == settings.nats_max_deliver
-    assert config.max_ack_pending == settings.nats_max_ack_pending
+    assert config.ack_wait == ACK_WAIT_SECONDS
+    assert config.max_deliver == MAX_DELIVER
+    assert config.max_ack_pending == MAX_ACK_PENDING
 
 
-def test_consumer_config_defaults_are_sane():
-    """Guard the values themselves: the defaults are the whole point of the fix."""
-    assert settings.nats_ack_wait >= 60
-    assert settings.nats_max_deliver > 0
-    assert settings.nats_max_ack_pending <= 2
-    assert settings.nats_progress_interval < settings.nats_ack_wait
+def test_heartbeat_outpaces_the_server_default_ack_wait():
+    """The heartbeat has to beat the 30s server default, not just our requested ack_wait.
+
+    Until the one-off `nats consumer edit` runs, the consumer still holds ack_wait=30s. An
+    interval sized against ACK_WAIT_SECONDS alone would send its first +WPI after the message
+    had already been redelivered.
+    """
+    progress_interval = inspect.signature(ProcessorWorker).parameters["progress_interval"].default
+
+    assert progress_interval < 30, "must beat the NATS server default ack_wait"
+    assert progress_interval < ACK_WAIT_SECONDS

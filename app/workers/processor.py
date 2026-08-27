@@ -20,7 +20,13 @@ class ProcessorWorker:
     Worker responsible for passing transcribed text and metadata to a list of live processors.
     """
     
-    def __init__(self, processors: list['LiveProcessor'], progress_interval: float = 30.0):
+    def __init__(
+        self,
+        processors: list['LiveProcessor'],
+        # Must stay well below the consumer's ack_wait, including the 30s server default that
+        # applies until the one-off `nats consumer edit` in the README has been run.
+        progress_interval: float = 20.0,
+    ):
         self.processors = processors
         self.progress_interval = progress_interval
 
@@ -45,16 +51,13 @@ class ProcessorWorker:
     @asynccontextmanager
     async def _keep_alive(self, msg: 'Msg'):
         """Hold the message's ack_wait timer open for as long as the body takes."""
-        task = None
-        if self.progress_interval > 0:
-            task = asyncio.create_task(self._send_progress(msg))
+        task = asyncio.create_task(self._send_progress(msg))
         try:
             yield
         finally:
-            if task is not None:
-                task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await task
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
 
     async def _send_progress(self, msg: 'Msg') -> None:
         """Periodically tell JetStream the message is still being worked on.
@@ -62,16 +65,18 @@ class ProcessorWorker:
         The +WPI this sends resets the ack timer without counting as a delivery, so a slow
         extraction stays on its first delivery instead of being handed out again and
         re-processed.
+
+        A failed beat is logged and retried on the next tick rather than ending the loop: the
+        publish fails transiently while the client reconnects, and giving up on the first one
+        would silently retire the protection for the rest of the message. The loop is ended by
+        _keep_alive cancelling it.
         """
         while True:
             await asyncio.sleep(self.progress_interval)
             try:
                 await msg.in_progress()
-            except asyncio.CancelledError:
-                raise
             except Exception as e:
-                logger.debug(f"ProcessorWorker: Stopping in-progress heartbeat: {e}")
-                return
+                logger.warning(f"ProcessorWorker: In-progress heartbeat failed, retrying next tick: {e}")
 
     async def _run_processors(self, text: str, metadata: dict) -> None:
         for processor in self.processors:

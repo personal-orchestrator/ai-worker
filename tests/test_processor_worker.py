@@ -10,11 +10,7 @@ async def test_processor_worker_handle_message():
     mock_processor.process = AsyncMock()
 
     worker = ProcessorWorker(processors=[mock_processor])
-
-    msg = Mock()
-    msg.subject = "transcription.completed"
-    msg.data = json.dumps({"filename": "test.m4a", "text": "Buy milk", "out_of_order": False}).encode("utf-8")
-    msg.ack = AsyncMock()
+    msg = _js_msg()
 
     await worker.handle_message(msg)
 
@@ -61,15 +57,33 @@ async def test_heartbeat_stops_once_processing_finishes():
 
     await asyncio.sleep(0.05)
 
+    assert settled > 0, "no heartbeat ran, so this proves nothing about it stopping"
     assert msg.in_progress.await_count == settled
 
 @pytest.mark.asyncio
+async def test_heartbeat_recovers_from_a_transient_failure():
+    """One failed +WPI must not retire the heartbeat for the rest of the message.
+
+    in_progress() is a publish, and nats-py raises while the client is mid-reconnect. Giving
+    up on the first failure would let ack_wait expire on a message still being worked on.
+    """
+    worker = _slow_worker()
+    msg = _js_msg()
+    msg.in_progress = AsyncMock(side_effect=[RuntimeError("connection draining")] + [None] * 500)
+
+    await worker.handle_message(msg)
+
+    assert msg.in_progress.await_count > 1, "heartbeat stopped after the first failure"
+    msg.ack.assert_awaited_once()
+
+@pytest.mark.asyncio
 async def test_failing_heartbeat_does_not_fail_the_message():
-    """in_progress() raises on a message with no JetStream reply subject; work must still finish."""
+    """A heartbeat that never succeeds must not stop the extraction from completing."""
     worker = _slow_worker()
     msg = _js_msg()
     msg.in_progress = AsyncMock(side_effect=RuntimeError("not a JetStream message"))
 
     await worker.handle_message(msg)
 
+    assert msg.in_progress.await_count > 0, "the raising path was never exercised"
     msg.ack.assert_awaited_once()
